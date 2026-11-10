@@ -42,13 +42,28 @@ Panel {
   property string lastError: ""
 
   readonly property string headline: {
+    if (isGame) return strings.t("pulse.game.active").arg(root.temp >= 0
+      ? Commons.I18n.formatNumber(root.temp, 0) + " °C"
+      : strings.t("pulse.profile.game"))
     if (!fresh) return strings.t("pulse.stale")
     if (!enabled) return strings.t("pulse.pinned")
     if (temp < 0) return strings.t("pulse.noThermal")
     return strings.t("pulse.tempMeta").arg(Commons.I18n.formatNumber(temp, 0))
   }
 
+  readonly property bool isGame: Model.isGame(status)
+
+  // The long form of what the running profile actually does. One paragraph,
+  // for the profile that is on, so the cards above can stay one line each.
+  readonly property string detailText: {
+    if (isGame) return strings.t("pulse.detail.game")
+    if (profile === "light") return strings.t("pulse.detail.light")
+    if (profile === "medium") return strings.t("pulse.detail.medium")
+    return strings.t("pulse.detail.full")
+  }
+
   readonly property string subline: {
+    if (isGame) return strings.t("pulse.game.hint")
     if (!fresh || !enabled) return ""
     var reasons = status.reasons || []
     if (reasons.length > 0) return String(reasons[0])
@@ -97,8 +112,8 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: panel.loadedContent
-    contentWidth: panel.fittedContentWidth(Style.space(300))
-    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(360))
+    contentWidth: panel.fittedContentWidth(Style.space(560))
+    contentHeight: panel.fittedContentHeight(panel.loadedContentHeight, Style.space(420))
 
     content: PanelKeyCatcher {
       id: keyCatcher
@@ -156,27 +171,84 @@ Panel {
 
         PanelSeparator { foreground: root.bar.foreground }
 
-        // ---------- three profiles, one press each ----------
-        Column {
+        // ---------- profiles, side by side ----------
+        //
+        // Three columns rather than three stacked rows: a profile difference
+        // is a difference of degree, and putting them along one axis makes
+        // the whole ladder readable in one glance instead of one scroll.
+        // The explanation sits under each name, wrapped, because "Light" and
+        // "Medium" mean nothing until you know what stops happening.
+        Grid {
           width: parent.width
-          spacing: Style.spacing.sm
+          columns: 3
+          columnSpacing: Style.spacing.sm
+          rowSpacing: Style.spacing.sm
 
           Repeater {
-            // Three fixed rows, built once from local catalogue strings.
+            // Fixed rows, built once from local catalogue strings.
             model: Model.profileRows(root.status, root.fresh, strings)
 
-            Toggle {
+            Button {
               required property var modelData
-              width: parent.width
-              label: modelData.label
-              description: modelData.hint
-              checked: modelData.checked
-              foreground: root.bar.foreground
-              accent: Commons.Color.accent
-              fontFamily: root.bar.fontFamily
-              onClicked: root.pin(modelData.id)
+              width: (parent.width - Style.spacing.sm * 2) / 3
+              height: Math.max(cardBody.implicitHeight + Style.space(20), Style.space(92))
+
+              bordered: true
+              // The game card is a report, not a control. Button's own MouseArea ignores
+              // `enabled`, so the guard has to be in the handler as well.
+              active: modelData.checked
+              opacity: modelData.id === "game" ? 0.75 : 1.0
+
+              Column {
+                id: cardBody
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                anchors.rightMargin: Style.space(10)
+                spacing: Style.space(4)
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: modelData.label
+                  color: root.bar.foreground
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.subtitle
+                  font.bold: true
+                  elide: Text.ElideRight
+                }
+
+                Text {
+                  textFormat: Text.PlainText
+                  width: parent.width
+                  text: modelData.short
+                  color: Qt.darker(root.bar.foreground, 1.5)
+                  font.family: root.bar.fontFamily
+                  font.pixelSize: Style.font.caption
+                  wrapMode: Text.WordWrap
+                }
+              }
+
+              onClicked: {
+                if (modelData.id === "game") return
+                root.pin(modelData.id)
+              }
             }
           }
+        }
+
+        // The full explanation for the profile that is actually running.
+        // Cards carry the one-line version; this says what changed and why.
+        Text {
+          textFormat: Text.PlainText
+          width: parent.width
+          visible: root.detailText !== ""
+          text: root.detailText
+          color: Qt.darker(root.bar.foreground, 1.25)
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
         }
 
         PanelSeparator { foreground: root.bar.foreground }

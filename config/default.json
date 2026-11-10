@@ -21,6 +21,10 @@
       "enabled": true,
       "lightBelow": 8,
       "mediumBelow": 18
+    },
+    "gamemode": {
+      "enabled": true,
+      "service": "com.feralinteractive.GameMode"
     }
   }
 }

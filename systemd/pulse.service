@@ -9,10 +9,10 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 %h/.config/omarchy/plugins/io.github.shapesv.pulse/bin/pulse-ctl loop
-# Whatever ends this unit — a clean stop, a crash, a logout — hand the desktop
-# back before going away. `stop` is idempotent and harmless when nothing was
-# ever applied.
-ExecStopPost=/usr/bin/python3 %h/.config/omarchy/plugins/io.github.shapesv.pulse/bin/pulse-ctl stop
+# Whatever ends this unit — a crash, a restart, a logout — put the desktop
+# back before going away. `cleanup`, not `stop`: a restart must not look like
+# someone asking Pulse to stand down, or it would stay idle after one.
+ExecStopPost=/usr/bin/python3 %h/.config/omarchy/plugins/io.github.shapesv.pulse/bin/pulse-ctl cleanup
 Restart=on-failure
 RestartSec=5
 # A sensor read and one JSON file twice a second is not work; keep it out of

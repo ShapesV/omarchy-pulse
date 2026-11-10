@@ -52,6 +52,11 @@ SERVICE = "pulse.service"
 # nowhere — every caller checks for it explicitly instead.
 PROFILES = ("light", "medium", "full")
 
+# Game Mode is a separate axis, not a fourth rung: it is never chosen by a
+# sensor threshold and never ranked against the others. Keeping it out of
+# PROFILES means the ladder comparison stays honest.
+GAME = "game"
+
 # What `applied` says when Pulse has handed the desktop back. Treated as "no
 # profile set", which is why the next tick must not try to rank it.
 FREE = "free"
@@ -69,6 +74,7 @@ HYPR_OPTIONS = {
     "dim_inactive": {"path": ("decoration", "dim_inactive"), "kind": "bool"},
     "gaps_out": {"path": ("general", "gaps_out"), "kind": "css"},
     "rounding": {"path": ("decoration", "rounding"), "kind": "int"},
+    "vrr": {"path": ("misc", "vrr"), "kind": "int"},
 }
 
 # The `getoption` name for each key, used for reading the baseline back.
@@ -78,6 +84,7 @@ HYPR_READ = {
     "dim_inactive": "decoration:dim_inactive",
     "gaps_out": "general:gaps_out",
     "rounding": "decoration:rounding",
+    "vrr": "misc:vrr",
 }
 
 # What each profile does to each option. None means "restore the baseline".
@@ -96,6 +103,7 @@ HYPR_LEVELS = {
         "animations": None,
         "gaps_out": None,
         "rounding": None,
+        "vrr": None,
     },
     "light": {
         "blur": False,
@@ -103,6 +111,21 @@ HYPR_LEVELS = {
         "dim_inactive": False,
         "gaps_out": 4,
         "rounding": 0,
+        "vrr": None,
+    },
+    # Game Mode is not a fourth rung on the same ladder. It answers a
+    # different question — "a game owns the screen, stop competing with it" —
+    # and the answers are things the thermal ladder deliberately never does:
+    # tear frames rather than buffer them, and let the panel follow the
+    # game's own refresh rate. VRR is 0 (off) / 1 (on) / 2 (fullscreen only);
+    # 2 is the setting that helps a game without touching the desktop.
+    "game": {
+        "blur": False,
+        "animations": False,
+        "dim_inactive": False,
+        "gaps_out": 0,
+        "rounding": 0,
+        "vrr": 2,
     },
 }
 
@@ -335,8 +358,46 @@ def demand(reading: Reading, cfg: dict) -> tuple[str | None, str]:
     return None, ""
 
 
+def read_gamemode(config: dict) -> Reading:
+    """Is a game running, according to the GameMode daemon?
+
+    Reads the `ClientCount` property rather than calling `QueryStatus`.
+    That distinction matters: QueryStatus registers the *calling* process as
+    a game, so a monitor that used it would make itself the game it is
+    watching for and Pulse would be in Game Mode permanently.
+
+    Returns a Reading whose value is the number of registered game clients.
+    """
+    cfg = config.get("tickers", {}).get("gamemode", {})
+    service = cfg.get("service", "com.feralinteractive.GameMode")
+    code, out = run(
+        ["busctl", "--user", "--json=short", "get-property",
+         service, "/com/feralinteractive/GameMode",
+         "com.feralinteractive.GameMode", "ClientCount"]
+    )
+    if code != 0 or not out.strip():
+        return Reading("gamemode", detail="gamemode daemon not reachable")
+    try:
+        payload = json.loads(out)
+        count = int(payload.get("data", 0))
+    except (ValueError, TypeError, AttributeError):
+        return Reading("gamemode", detail="unreadable ClientCount")
+    return Reading(
+        "gamemode",
+        value=float(count),
+        available=True,
+        detail=f"{count} game client{'s' if count != 1 else ''} registered",
+    )
+
+
 def desired_profile(readings: list[Reading], config: dict) -> tuple[str, list[str]]:
-    """Take the lightest profile any ticker asks for, with its reasons."""
+    """Take the lightest profile any ticker asks for, with its reasons.
+
+    Game Mode outranks every sensor. A machine that is hot *and* running a
+    game should do what the game needs, not what the thermal ladder would
+    have done on its own — and when the game exits, the ladder resumes from
+    whatever the sensors say at that moment.
+    """
     tickers = config.get("tickers", {})
     target = "full"
     reasons: list[str] = []
@@ -345,6 +406,12 @@ def desired_profile(readings: list[Reading], config: dict) -> tuple[str, list[st
         cfg = tickers.get(reading.name, {})
         if not cfg.get("enabled", True):
             continue
+
+        if reading.name == "gamemode":
+            if reading.available and reading.value and reading.value > 0:
+                return GAME, [reading.detail]
+            continue
+
         want, reason = demand(reading, cfg)
         if want is None:
             continue
@@ -430,7 +497,12 @@ def handle_request(req: dict, config: dict, state: dict) -> None:
     elif action == "enable":
         on = bool(req.get("value"))
         save_config_patch({"enabled": on})
-        # Re-enabling re-arms adaptation from wherever the desktop currently is.
+        # Turning adaptation back on is also how a released daemon picks the
+        # desktop up again, so it clears the flag that kept it idle.
+        if on:
+            state["released"] = False
+            if state.get("applied") == FREE:
+                state["applied"] = "full"
         state["candidate"] = ""
         state["candidateTicks"] = 0
         state["since"] = time.time()
@@ -441,6 +513,7 @@ def handle_request(req: dict, config: dict, state: dict) -> None:
         if baseline:
             apply_baseline(baseline)
         state["applied"] = FREE
+        state["released"] = True
         state["evaluated"] = "full"
         state["baseline"] = None
         log("released the desktop back to its baseline")
@@ -466,6 +539,11 @@ def capture_baseline() -> dict:
         else:
             value = data.get("int")
         baseline[key] = {"kind": kind, "value": value}
+
+    # The power profile is restored the same way the Hyprland options are, so
+    # Game Mode does not leave the laptop in performance after the game quits.
+    code, out = run(["powerprofilesctl", "get"])
+    baseline["powerProfile"] = out.strip() if code == 0 and out.strip() else None
     return baseline
 
 
@@ -515,18 +593,54 @@ def hypr_set(key: str, value) -> bool:
 def apply_baseline(baseline: dict) -> list[str]:
     restored: list[str] = []
     for key, spec in baseline.items():
+        if key == "powerProfile":
+            # Not a Hyprland option; it is a string and has its own writer.
+            if spec and set_power_profile(str(spec)):
+                restored.append("power-profile")
+            continue
         value = spec.get("value")
         if value is not None and hypr_set(key, value):
             restored.append(key)
     return restored
 
 
+def power_profiles() -> set[str]:
+    """Which profiles this machine actually offers.
+
+    On this laptop power-profiles-daemon sits on the placeholder driver and
+    offers only balanced and power-saver — asking for "performance" fails, so
+    Game Mode asks for what exists rather than for what the daemon is
+    supposed to have.
+    """
+    code, out = run(["powerprofilesctl", "list"])
+    if code != 0:
+        return set()
+    return {m.group(1) for m in re.finditer(r"^\s*\*?\s*([a-z-]+):", out, re.MULTILINE)}
+
+
+def set_power_profile(name: str) -> bool:
+    if name not in power_profiles():
+        return False
+    code, _ = run(["powerprofilesctl", "set", name])
+    return code == 0
+
+
 def apply_profile(profile: str, baseline: dict) -> list[str]:
     """Move Hyprland to `profile`. Returns the option names that changed."""
-    if not hypr_available():
-        return []
-
     changed: list[str] = []
+
+    # The power profile is not a Hyprland option and not every machine has
+    # every profile, so it is applied separately and only when it exists.
+    if profile == GAME:
+        if set_power_profile("performance"):
+            changed.append("power-profile:performance")
+    elif baseline.get("powerProfile"):
+        if set_power_profile(str(baseline["powerProfile"])):
+            changed.append("power-profile:restore")
+
+    if not hypr_available():
+        return changed
+
     for key, target in HYPR_LEVELS.get(profile, {}).items():
         if target is None:
             value = (baseline.get(key) or {}).get("value")
@@ -552,6 +666,10 @@ def default_state() -> dict:
         "tempHistory": [],
         "lastChanged": [],
         "baseline": None,
+        # True only when a person asked Pulse to let go. A restart does not
+        # set it, which is what keeps `systemctl restart` from silently
+        # leaving the desktop unmanaged.
+        "released": False,
         "error": "",
     }
 
@@ -606,6 +724,8 @@ def take_readings(config: dict) -> list[Reading]:
         readings.append(read_load())
     if tickers.get("memory", {}).get("enabled", True):
         readings.append(read_memory())
+    if tickers.get("gamemode", {}).get("enabled", True):
+        readings.append(read_gamemode(config))
     return readings
 
 
@@ -643,10 +763,17 @@ def evaluate(config: dict, state: dict, *, apply: bool) -> None:
     now = time.time()
     applied = state.get("applied", "full")
 
-    # "free" means Pulse already handed the desktop back and is not driving it.
-    # It is not rankable against a real profile, so a released daemon must not
-    # re-enter the comparison — it simply has nothing to do until someone
-    # pins a profile or turns adaptation back on.
+    # "free" means Pulse already handed the desktop back. It is not rankable
+    # against a real profile, so a released daemon must not re-enter the
+    # comparison — it has nothing to do until someone pins a profile or turns
+    # adaptation back on.
+    #
+    # The `released` flag is what distinguishes "a person asked for control
+    # back" from "the service was restarted": a restart clears the flag in
+    # `cleanup`, so only an explicit release keeps Pulse idle.
+    if applied == FREE and not state.get("released"):
+        state["applied"] = "full"
+        applied = "full"
     if applied == FREE:
         state["reasons"] = reasons if enabled else []
         return
@@ -658,16 +785,19 @@ def evaluate(config: dict, state: dict, *, apply: bool) -> None:
             state["candidate"] = target
             state["candidateTicks"] = 1
 
-        # Going lighter reacts on the hysteresis count alone: a machine in
-        # trouble should not have to stay in trouble. Coming back up needs the
-        # count *and* the hold timer, so a machine parked on a threshold does
-        # not flap between profiles every tick. A pinned profile skips both —
-        # it is a decision someone made, not a sensor guess.
-        lighter = PROFILES.index(target) < PROFILES.index(applied)
+        # Entering or leaving Game Mode is a state change, not a threshold
+        # crossing: it takes effect on the same tick, because waiting three
+        # seconds after launch is three seconds of a game not being optimised.
+        #
+        # `lighter` is computed only when neither side is Game Mode, because
+        # "game" is not on the ladder and ranking it raises.
+        gamebound = GAME in (target, applied)
+        lighter = False if gamebound else PROFILES.index(target) < PROFILES.index(applied)
+
         settled = state["candidateTicks"] >= hysteresis
         cooled = (now - float(state.get("since", 0))) >= hold
 
-        if not enabled or (settled and (lighter or cooled)):
+        if not enabled or gamebound or (settled and (lighter or cooled)):
             state["lastChanged"] = apply_profile(target, state.get("baseline") or {})
             state["applied"] = target
             state["since"] = now
@@ -742,7 +872,8 @@ def main() -> int:
     sub.add_parser("loop", help="run the adaptation loop in the foreground (the service runs this)")
     sub.add_parser("tick", help="evaluate once, drive the desktop, write state")
     sub.add_parser("status", help="print the current snapshot without changing anything")
-    sub.add_parser("stop", help="release the desktop back to its pre-Pulse baseline")
+    sub.add_parser("stop", help="release the desktop back to its pre-Pulse baseline and stay out of it")
+    sub.add_parser("cleanup", help="restore the baseline without marking the desktop released")
 
     p_profile = sub.add_parser("profile", help="pin a profile by hand and stop adapting")
     p_profile.add_argument("value", choices=list(PROFILES))
@@ -799,6 +930,8 @@ def main() -> int:
         return 0
 
     if args.command == "stop":
+        # A person asked for control back. That outlives the daemon, so it is
+        # recorded as `released` and only an explicit `enable on` clears it.
         if daemon_running():
             request("stop")
             emit({"ok": True, "queued": True})
@@ -806,10 +939,24 @@ def main() -> int:
         baseline = state.get("baseline")
         restored = apply_baseline(baseline) if baseline else []
         state["applied"] = FREE
+        state["released"] = True
         state["baseline"] = None
         save_state(state)
         write_json(STATE_FILE.with_name("snapshot.json"), snapshot(load_config(plugin_dir), state))
         emit({"ok": True, "queued": False, "restored": restored})
+        return 0
+
+    if args.command == "cleanup":
+        # The unit's ExecStopPost. Put the desktop back, but leave no trace
+        # that would make the next start believe someone released it: a
+        # restart is not a decision, and treating it as one left Pulse idle
+        # forever after any `systemctl restart`.
+        baseline = state.get("baseline")
+        if baseline:
+            apply_baseline(baseline)
+        state["baseline"] = None
+        save_state(state)
+        emit({"ok": True})
         return 0
 
     return 2

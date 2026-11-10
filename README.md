@@ -17,28 +17,47 @@ switched off — so the state of the machine reads at a glance next to the clock
 
 Only Hyprland options, and only ones it can read back and restore exactly:
 
-| Option | Light | Medium | Full |
-|---|---|---|---|
-| `decoration:blur:enabled` | off | off | as you had it |
-| `decoration:dim_inactive` | off | off | as you had it |
-| `animations:enabled` | off | as you had it | as you had it |
-| `general:gaps_out` | 4 | as you had it | as you had it |
-| `decoration:rounding` | 0 | as you had it | as you had it |
+| Option | Light | Medium | Full | Game |
+|---|---|---|---|---|
+| `decoration:blur:enabled` | off | off | as you had it | off |
+| `decoration:dim_inactive` | off | off | as you had it | off |
+| `animations:enabled` | off | as you had it | as you had it | off |
+| `general:gaps_out` | 4 | as you had it | as you had it | 0 |
+| `decoration:rounding` | 0 | as you had it | as you had it | 0 |
+| `misc:vrr` | as you had it | as you had it | as you had it | on (fullscreen) |
+| power profile | as you had it | as you had it | as you had it | `performance` if offered |
 
-The two steps differ in kind rather than degree. Medium drops the expensive
-per-pixel decoration and leaves movement alone, so the desktop still feels like
-itself. Light removes motion and spacing, which is the step you notice
-immediately and the reason it is reserved for actual pressure.
+Light, Medium and Full are a ladder: each answer to "how much is the machine
+struggling". Game Mode is not a fourth rung on that ladder — it answers a
+different question, "a game owns the screen now, stop competing with it", and
+the answers are ones the ladder deliberately never gives.
 
-Nothing outside your user session is touched: no sudo, no sysctl, no governor,
-no GPU knobs. If you want thermal limits raised at the kernel level, that is a
-different tool with a different risk profile.
+Nothing outside your user session is touched: no sudo, no sysctl, no governor.
+The power profile is the one non-Hyprland knob, and it is set through
+`powerprofilesctl` only to a profile the machine actually lists.
+
+## Game Mode
+
+Pulse watches [GameMode](https://github.com/FeralInteractive/gamemode) and
+enters Game Mode when a game registers itself.
+
+It reads the `ClientCount` property rather than calling `QueryStatus`. That
+distinction is the whole reason this works: `QueryStatus` registers the
+*calling* process as a game, so a monitor built on it becomes the game it is
+watching for and Pulse would sit in Game Mode forever.
+
+Game Mode outranks every sensor. A hot machine running a game should do what
+the game needs, and the thermal ladder resumes by itself when the game exits —
+from whatever the sensors say at that moment, not from what they said before.
+
+`gamemoded` can be told to release a client that is not really a game, so the
+mode lasts exactly as long as the game does.
 
 ## Why the logic lives in Python, not QML
 
 A threshold that changes what your desktop looks like belongs somewhere it can
 be tested from a shell and reasoned about on its own. So `bin/pulse-ctl` owns
-every decision, and `Panel.qml` only draws what the daemon reports:
+every decision, and `BarWidget.qml` only draws what the daemon reports:
 
 - the daemon writes a snapshot file once per tick;
 - the panel watches that file with `FileView`;

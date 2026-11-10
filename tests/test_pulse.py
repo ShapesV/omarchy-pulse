@@ -222,13 +222,75 @@ def test_a_released_daemon_does_not_crash_on_its_next_tick():
     PROFILES.index and take the service down with it."""
     state = pulse.default_state()
     state["applied"] = pulse.FREE
+    state["released"] = True
     state["baseline"] = {}
 
     config = {"enabled": True, "tickers": {}}
-    # Must return quietly rather than raise.
     pulse.evaluate(config, state, apply=True)
 
-    assert state["applied"] == pulse.FREE
+    assert state["applied"] == pulse.FREE, "an explicit release must be respected"
+
+
+def test_a_restart_picks_the_desktop_back_up():
+    """`stop` and `systemctl restart` both leave applied as "free", but only
+    the first is a decision. Anything else and one restart leaves Pulse idle
+    forever, which is what happened the first time."""
+    state = pulse.default_state()
+    state["applied"] = pulse.FREE
+    state["released"] = False
+    state["baseline"] = {}
+
+    config = {"enabled": True, "tickers": {}}
+    pulse.evaluate(config, state, apply=True)
+
+    assert state["applied"] != pulse.FREE
+
+
+def test_game_mode_is_not_ranked_against_profiles():
+    """Game Mode is a separate axis. Ranking it raised ValueError and took the
+    daemon down on the first launch after it was added."""
+    state = pulse.default_state()
+    state["applied"] = "game"
+    state["baseline"] = {}
+
+    config = {"enabled": True, "tickers": {"gamemode": {"enabled": True}}}
+    game = pulse.Reading("gamemode", value=1.0, available=True, detail="1 game client registered")
+    original = pulse.take_readings
+    pulse.take_readings = lambda _cfg: [game]
+    try:
+        pulse.evaluate(config, state, apply=True)
+    finally:
+        pulse.take_readings = original
+
+    assert state["applied"] == "game"
+
+
+def test_game_mode_outranks_a_hot_cpu():
+    """A hot machine running a game should do what the game needs. The thermal
+    ladder resumes by itself once the game exits."""
+    game = pulse.Reading("gamemode", value=1.0, available=True, detail="1 game client registered")
+    hot = pulse.Reading("thermal", value=95.0, available=True, detail="95C")
+    config = {
+        "tickers": {
+            "gamemode": {"enabled": True},
+            "thermal": {"enabled": True, "lightAbove": 88, "mediumAbove": 75},
+        }
+    }
+
+    assert pulse.desired_profile([hot, game], config)[0] == pulse.GAME
+
+
+def test_no_game_means_the_ladder_decides():
+    idle = pulse.Reading("gamemode", value=0.0, available=True, detail="0 game clients")
+    hot = pulse.Reading("thermal", value=80.0, available=True, detail="80C")
+    config = {
+        "tickers": {
+            "gamemode": {"enabled": True},
+            "thermal": {"enabled": True, "lightAbove": 88, "mediumAbove": 75},
+        }
+    }
+
+    assert pulse.desired_profile([hot, idle], config)[0] == "medium"
 
 
 def test_free_is_not_a_profil():

@@ -43,7 +43,12 @@ var GLYPH_MEDIUM = "\u{F0297}"  // md-gamepad_variant (outlined)
 var GLYPH_LIGHT = "\u{F02B5}"   // md-google_controller_off
 var GLYPH_STALE = "\u{F00D}"    // nf-fa-times
 
+// Full brightness on the bar while a game owns the screen, so the icon reads
+// as "engaged" rather than as one more state.
+var GLYPH_GAME = "\u{F11B}"    // nf-fa-gamepad, filled
+
 function profileGlyph(profile, enabled, fresh) {
+  if (String(profile || "") === "game") return GLYPH_GAME
   if (enabled === false || fresh === false) return GLYPH_STALE
   if (profile === "light") return GLYPH_LIGHT
   if (profile === "medium") return GLYPH_MEDIUM
@@ -132,28 +137,50 @@ function parseSnapshot(raw) {
   return { ok: true, error: "", status: status }
 }
 
-// Rows for the three profile switches, already formatted. Fixed length and
-// fixed order, built from local catalogue strings only.
+// Rows for the profile switches, already formatted. Fixed order, built from
+// local catalogue strings only.
+//
+// Game Mode appears only while it is active. It is not one of the three
+// choices — nothing you press turns it on, GameMode does — so offering it as
+// a peer of Light/Medium/Full would be a lie about what pressing it does.
 function profileRows(status, fresh, strings) {
   var configured = clampProfile(status && status.configured)
+  var applied = String(status && status.applied || "")
 
-  function row(id, labelKey, hintKey) {
+  function row(id, labelKey, shortKey) {
     return {
       id: id,
       label: strings.t(labelKey),
-      hint: strings.t(hintKey),
-      // The switch shows what the config asks for. The headline shows what
-      // the sensors actually got. Keeping them apart is the whole point of
-      // the panel: one is a decision, the other is a reading.
+      // One line for the card face. The full paragraph lives in
+      // `detailText` on the panel, so a card never has to hold an essay.
+      short: strings.t(shortKey),
+      // The switch shows what the config asks for. The headline shows what is
+      // actually running. Keeping them apart is the whole point: one is a
+      // decision, the other is a reading.
       checked: configured === id
     }
   }
 
-  return [
-    row("light", "pulse.profile.light", "pulse.hint.light"),
-    row("medium", "pulse.profile.medium", "pulse.hint.medium"),
-    row("full", "pulse.profile.full", "pulse.hint.full")
+  var rows = [
+    row("light", "pulse.profile.light", "pulse.short.light"),
+    row("medium", "pulse.profile.medium", "pulse.short.medium"),
+    row("full", "pulse.profile.full", "pulse.short.full")
   ]
+
+  if (applied === "game") {
+    rows.push({
+      id: "game",
+      label: strings.t("pulse.profile.game"),
+      short: strings.t("pulse.short.game"),
+      checked: true
+    })
+  }
+
+  return rows
+}
+
+function isGame(status) {
+  return String(status && status.applied || "") === "game"
 }
 
 // Rows for the sensor block, already formatted. `strings` is the plugin's
