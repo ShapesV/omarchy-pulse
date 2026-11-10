@@ -164,3 +164,75 @@ def test_stale_snapshot_is_recognised():
 
     fresh = pulse.snapshot({}, {"sensors": {}, "tempHistory": [], "updated": time.time()})
     assert fresh["updated"] > 0
+
+# --------------------------------------------------------------------------
+# request path
+# --------------------------------------------------------------------------
+
+def test_a_command_hands_work_to_the_daemon_instead_of_writing_state(tmp_path, monkeypatch):
+    """The bug this exists to prevent: a command that writes state.json is
+    silently overwritten by the daemon's next tick, so the user's click
+    appears to do nothing."""
+    monkeypatch.setattr(pulse, "RUN_DIR", tmp_path)
+    monkeypatch.setattr(pulse, "REQUEST_FILE", tmp_path / "request.json")
+
+    pulse.request("profile", value="light")
+
+    stored = pulse.read_json(tmp_path / "request.json", None)
+    assert stored["action"] == "profile"
+    assert stored["value"] == "light"
+
+
+def test_taking_a_request_consumes_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(pulse, "REQUEST_FILE", tmp_path / "request.json")
+    pulse.write_json(tmp_path / "request.json", {"action": "enable", "value": True})
+
+    first = pulse.take_request()
+    second = pulse.take_request()
+
+    assert first["action"] == "enable"
+    assert second is None, "a drained request must not be replayed on the next tick"
+
+
+def test_taking_an_absent_request_is_not_an_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(pulse, "REQUEST_FILE", tmp_path / "request.json")
+    assert pulse.take_request() is None
+
+
+def test_pinned_profile_is_applied_even_though_adaptation_is_off():
+    """Pinning used to only write config and leave the desktop alone when the
+    daemon was mid-flight, so the switch moved and nothing else did."""
+    calls = {}
+    monkeypatch_target = pulse.apply_profile
+    pulse.apply_profile = lambda name, base: calls.setdefault("name", name) or []
+    try:
+        state = {"applied": "full", "baseline": {}}
+        cfg = {"enabled": False, "profile": "light"}
+        pulse.save_config_patch = lambda patch: cfg.update(patch)
+        pulse.handle_request({"action": "profile", "value": "light"}, cfg, state)
+        assert state["applied"] == "light"
+        assert calls.get("name") == "light"
+    finally:
+        pulse.apply_profile = monkeypatch_target
+
+
+def test_a_released_daemon_does_not_crash_on_its_next_tick():
+    """`stop` sets applied to "free", which is not rankable against a real
+    profile. Ticking in that state used to raise ValueError out of
+    PROFILES.index and take the service down with it."""
+    state = pulse.default_state()
+    state["applied"] = pulse.FREE
+    state["baseline"] = {}
+
+    config = {"enabled": True, "tickers": {}}
+    # Must return quietly rather than raise.
+    pulse.evaluate(config, state, apply=True)
+
+    assert state["applied"] == pulse.FREE
+
+
+def test_free_is_not_a_profil():
+    """Ranking against "free" is the failure above; keeping it out of the
+    tuple means any future caller that forgets gets a clear error, not a
+    silent miscomparison."""
+    assert pulse.FREE not in pulse.PROFILES

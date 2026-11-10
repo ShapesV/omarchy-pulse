@@ -4,7 +4,8 @@ Adaptive performance profiles for [Omarchy](https://omarchy.org). Pulse watches
 CPU temperature, load and free memory, and steps the desktop down to a lighter
 profile *before* you feel the slowdown — then steps back up when the air clears.
 
-The bar icon is a thermometer that drains as the machine gets squeezed.
+The bar icon is a gamepad drawn at three levels of detail — solid, outlined,
+switched off — so the state of the machine reads at a glance next to the clock.
 
 ```
          light            medium             full
@@ -66,6 +67,12 @@ Uninstall, restoring the desktop first:
 ```
 
 ## Commands
+
+Commands never write state. The daemon owns `state.json` and rewrites it every
+tick; a command that wrote alongside it would be overwritten within two seconds,
+so clicks would appear to do nothing. Instead a command drops a request in
+`$XDG_RUNTIME_DIR/omarchy-pulse/request.json` and the daemon carries it out
+inside its own loop, on its next tick.
 
 ```bash
 pulse-ctl status             what it thinks right now

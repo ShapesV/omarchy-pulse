@@ -26,15 +26,39 @@ function pythonBinary() {
   return "/usr/bin/python3"
 }
 
-// Glyph per profile. Deliberately monotone — a thermometer filling up and
-// draining — so the bar reads at a glance without a legend. Stale data gets
-// the "paused" cross rather than a temperature, because a frozen reading is
-// a lie.
+// Glyph per profile: one gamepad, drawn at three levels of detail, because
+// that is what the widget is about — how much of the machine the frame gets.
+//
+//   full    solid gamepad         everything the compositor can give is on
+//   medium  outlined gamepad      decoration dropped, motion kept
+//   light   gamepad switched off  the flat, everything-off step
+//   stale   crossed gamepad       the daemon is not running; a frozen
+//                                 reading would be a lie, so say so
+//
+// All three are Material gamepad glyphs confirmed present in
+// JetBrainsMono Nerd Font, which the bar reaches through the
+// omarchy-font-set alias.
+var GLYPH_FULL = "\u{F0296}"    // md-gamepad
+var GLYPH_MEDIUM = "\u{F0297}"  // md-gamepad_variant (outlined)
+var GLYPH_LIGHT = "\u{F02B5}"   // md-google_controller_off
+var GLYPH_STALE = "\u{F00D}"    // nf-fa-times
+
 function profileGlyph(profile, enabled, fresh) {
-  if (enabled === false || fresh === false) return ""  // nf-fa-times
-  if (profile === "light") return ""                   // nf-md-thermometer_high
-  if (profile === "medium") return ""                  // nf-md-thermometer
-  return ""                                            // nf-md-thermometer_low
+  if (enabled === false || fresh === false) return GLYPH_STALE
+  if (profile === "light") return GLYPH_LIGHT
+  if (profile === "medium") return GLYPH_MEDIUM
+  return GLYPH_FULL
+}
+
+// Tooltip on the bar button. Short: it is read at a glance, not studied.
+function barTooltip(profile, temp, enabled, fresh) {
+  if (fresh === false) return "Pulse: no data"
+  var label = String(profile || "full")
+  if (enabled === false) return "Pulse: pinned " + label
+  if (typeof temp === "number" && isFinite(temp) && temp >= 0) {
+    return "Pulse: " + label + " · " + Math.round(temp) + " °C"
+  }
+  return "Pulse: " + label
 }
 
 function emptyStatus() {
@@ -106,6 +130,30 @@ function parseSnapshot(raw) {
   status.lastChanged = Array.isArray(data.lastChanged) ? data.lastChanged.map(String) : []
   status.updated = Number(data.updated) || 0
   return { ok: true, error: "", status: status }
+}
+
+// Rows for the three profile switches, already formatted. Fixed length and
+// fixed order, built from local catalogue strings only.
+function profileRows(status, fresh, strings) {
+  var configured = clampProfile(status && status.configured)
+
+  function row(id, labelKey, hintKey) {
+    return {
+      id: id,
+      label: strings.t(labelKey),
+      hint: strings.t(hintKey),
+      // The switch shows what the config asks for. The headline shows what
+      // the sensors actually got. Keeping them apart is the whole point of
+      // the panel: one is a decision, the other is a reading.
+      checked: configured === id
+    }
+  }
+
+  return [
+    row("light", "pulse.profile.light", "pulse.hint.light"),
+    row("medium", "pulse.profile.medium", "pulse.hint.medium"),
+    row("full", "pulse.profile.full", "pulse.hint.full")
+  ]
 }
 
 // Rows for the sensor block, already formatted. `strings` is the plugin's

@@ -40,9 +40,21 @@ STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
 STATE_FILE = STATE_DIR / "state.json"
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "omarchy-pulse"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+# The running daemon owns state.json; commands never write it behind its back.
+# They drop a request here and the daemon performs it inside its own loop, so
+# the two cannot overwrite each other.
+RUN_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "omarchy-pulse"
+REQUEST_FILE = RUN_DIR / "request.json"
+SERVICE = "pulse.service"
 
-# Lightest first. "free" is not a profile: it means Pulse is not driving.
+# Lightest first. "free" is not a profile: it means Pulse is not driving, and
+# it is deliberately *outside* this tuple so that comparing against it raises
+# nowhere — every caller checks for it explicitly instead.
 PROFILES = ("light", "medium", "full")
+
+# What `applied` says when Pulse has handed the desktop back. Treated as "no
+# profile set", which is why the next tick must not try to rank it.
+FREE = "free"
 
 # Every Hyprland option Pulse is allowed to move.
 #
@@ -364,6 +376,76 @@ def hypr_get(option: str) -> dict | None:
         return None
 
 
+def daemon_running() -> bool:
+    """Is the loop actually alive to act on a request?"""
+    code, out = run(["systemctl", "--user", "is-active", SERVICE])
+    return code == 0 and out.strip() == "active"
+
+
+def request(action: str, **payload) -> bool:
+    """Ask the running daemon to do something, inside its own loop.
+
+    The daemon rewrites state.json every tick. A command that wrote state
+    alongside it would be overwritten within the poll interval — which is
+    exactly the bug this replaces — so commands hand the work over instead.
+    """
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    write_json(REQUEST_FILE, {"action": action, "at": time.time(), **payload})
+    return True
+
+
+def take_request() -> dict | None:
+    """Consume a pending request, if any. Called once per tick by the loop."""
+    if not REQUEST_FILE.exists():
+        return None
+    data = read_json(REQUEST_FILE, None)
+    try:
+        REQUEST_FILE.unlink()
+    except OSError:
+        pass
+    return data if isinstance(data, dict) else None
+
+
+def handle_request(req: dict, config: dict, state: dict) -> None:
+    """Carry out one request. Runs inside the daemon's own loop."""
+    action = req.get("action")
+
+    if action == "profile":
+        value = req.get("value")
+        if value not in PROFILES:
+            return
+        # Pinning also disables adaptation: a profile you asked for should not
+        # be overruled two seconds later by a temperature reading.
+        save_config_patch({"enabled": False, "profile": value})
+        if state.get("baseline") is None:
+            state["baseline"] = capture_baseline()
+        state["lastChanged"] = apply_profile(value, state["baseline"])
+        state["applied"] = value
+        state["evaluated"] = value
+        state["since"] = time.time()
+        state["candidate"] = ""
+        state["candidateTicks"] = 0
+        log(f"pinned to {value}")
+
+    elif action == "enable":
+        on = bool(req.get("value"))
+        save_config_patch({"enabled": on})
+        # Re-enabling re-arms adaptation from wherever the desktop currently is.
+        state["candidate"] = ""
+        state["candidateTicks"] = 0
+        state["since"] = time.time()
+        log("adaptation on" if on else "adaptation off")
+
+    elif action == "stop":
+        baseline = state.get("baseline")
+        if baseline:
+            apply_baseline(baseline)
+        state["applied"] = FREE
+        state["evaluated"] = "full"
+        state["baseline"] = None
+        log("released the desktop back to its baseline")
+
+
 def capture_baseline() -> dict:
     """Snapshot every option we might touch, before touching any of it."""
     baseline: dict = {}
@@ -549,6 +631,9 @@ def evaluate(config: dict, state: dict, *, apply: bool) -> None:
     if enabled:
         target, reasons = desired_profile(readings, config)
     else:
+        # Pinned: the profile in the config is the target, whatever the
+        # sensors say. It still has to be *applied*, which is why this is a
+        # target and not an early return.
         target, reasons = config.get("profile", "medium"), []
 
     state["evaluated"] = target
@@ -558,7 +643,15 @@ def evaluate(config: dict, state: dict, *, apply: bool) -> None:
     now = time.time()
     applied = state.get("applied", "full")
 
-    if apply and enabled and target != applied:
+    # "free" means Pulse already handed the desktop back and is not driving it.
+    # It is not rankable against a real profile, so a released daemon must not
+    # re-enter the comparison — it simply has nothing to do until someone
+    # pins a profile or turns adaptation back on.
+    if applied == FREE:
+        state["reasons"] = reasons if enabled else []
+        return
+
+    if apply and target != applied:
         if target == state.get("candidate"):
             state["candidateTicks"] = int(state.get("candidateTicks", 0)) + 1
         else:
@@ -568,12 +661,13 @@ def evaluate(config: dict, state: dict, *, apply: bool) -> None:
         # Going lighter reacts on the hysteresis count alone: a machine in
         # trouble should not have to stay in trouble. Coming back up needs the
         # count *and* the hold timer, so a machine parked on a threshold does
-        # not flap between profiles every tick.
+        # not flap between profiles every tick. A pinned profile skips both —
+        # it is a decision someone made, not a sensor guess.
         lighter = PROFILES.index(target) < PROFILES.index(applied)
         settled = state["candidateTicks"] >= hysteresis
         cooled = (now - float(state.get("since", 0))) >= hold
 
-        if settled and (lighter or cooled):
+        if not enabled or (settled and (lighter or cooled)):
             state["lastChanged"] = apply_profile(target, state.get("baseline") or {})
             state["applied"] = target
             state["since"] = now
@@ -597,11 +691,26 @@ def cmd_tick(config: dict, state: dict) -> int:
 
 
 def cmd_loop(config: dict, state: dict) -> int:
-    """The service entry point: tick, sleep, repeat, and always clean up."""
-    interval = max(1.0, float(config.get("pollInterval", 2.0)))
+    """The service entry point: take requests, tick, sleep, clean up.
+
+    Requests are drained *before* the tick, and the config is re-read after
+    one arrives, so a profile pinned a moment ago is the profile this tick
+    applies — instead of being overruled by the tick that was already in
+    flight.
+    """
+    interval = max(0.5, float(config.get("pollInterval", 2.0)))
+    plugin_dir = Path(__file__).resolve().parent.parent
+    log(f"running, every {interval:g}s")
+
     try:
         while True:
-            config = load_config(Path(__file__).resolve().parent.parent)
+            req = take_request()
+            if req is not None:
+                config = load_config(plugin_dir)
+                handle_request(req, config, state)
+                save_state(state)
+
+            config = load_config(plugin_dir)
             cmd_tick(config, state)
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -612,7 +721,7 @@ def cmd_loop(config: dict, state: dict) -> int:
         baseline = state.get("baseline")
         if baseline:
             apply_baseline(baseline)
-            state["applied"] = "free"
+            state["applied"] = FREE
             state["baseline"] = None
             save_state(state)
             log("released the desktop back to its baseline")
@@ -661,33 +770,46 @@ def main() -> int:
         return 0
 
     if args.command == "profile":
-        # Pinning also disables adaptation: a profile you asked for should not
-        # be overruled two seconds later by a temperature reading.
+        if daemon_running():
+            request("profile", value=args.value)
+            emit({"ok": True, "queued": True, "profile": args.value})
+            return 0
+        # No daemon to hand it to: do the work here, and persist it the same
+        # way a request would have.
         save_config_patch({"enabled": False, "profile": args.value})
         state["baseline"] = state.get("baseline") or capture_baseline()
-        changed = apply_profile(args.value, state["baseline"])
+        state["lastChanged"] = apply_profile(args.value, state["baseline"])
         state["applied"] = args.value
+        state["evaluated"] = args.value
         state["since"] = time.time()
-        state["lastChanged"] = changed
         save_state(state)
         write_json(STATE_FILE.with_name("snapshot.json"), snapshot(load_config(plugin_dir), state))
-        emit({"ok": True, "profile": args.value, "changed": changed})
+        emit({"ok": True, "queued": False, "profile": args.value, "changed": state["lastChanged"]})
         return 0
 
     if args.command == "enable":
-        save_config_patch({"enabled": args.value == "on"})
+        on = args.value == "on"
+        if daemon_running():
+            request("enable", value=on)
+            emit({"ok": True, "queued": True, "enabled": on})
+            return 0
+        save_config_patch({"enabled": on})
         write_json(STATE_FILE.with_name("snapshot.json"), snapshot(load_config(plugin_dir), state))
-        emit({"ok": True, "enabled": args.value == "on"})
+        emit({"ok": True, "queued": False, "enabled": on})
         return 0
 
     if args.command == "stop":
+        if daemon_running():
+            request("stop")
+            emit({"ok": True, "queued": True})
+            return 0
         baseline = state.get("baseline")
         restored = apply_baseline(baseline) if baseline else []
-        state["applied"] = "free"
+        state["applied"] = FREE
         state["baseline"] = None
         save_state(state)
         write_json(STATE_FILE.with_name("snapshot.json"), snapshot(load_config(plugin_dir), state))
-        emit({"ok": True, "restored": restored})
+        emit({"ok": True, "queued": False, "restored": restored})
         return 0
 
     return 2
