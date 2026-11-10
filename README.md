@@ -50,10 +50,10 @@ driven entirely from a terminal if the panel is not to your taste.
 ## Install
 
 ```bash
-git clone https://github.com/USERNAME/omarchy-pulse
+git clone https://github.com/ShapesV/omarchy-pulse
 cd omarchy-pulse
 ./install.sh
-omarchy plugin enable io.github.USERNAME.pulse
+omarchy plugin enable io.github.shapesv.pulse
 ```
 
 `install.sh` copies the checkout into `~/.config/omarchy/plugins/`, installs the

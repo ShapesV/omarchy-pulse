@@ -7,36 +7,40 @@ import qs.Commons
 import qs.Commons as Commons
 import "Model.js" as Model
 
-// Pulse — adaptive performance profiles.
+// The Pulse popup. Loaded by BarWidget.qml, which owns the bar slot.
 //
-// Deliberately small. The panel is three rows and a slider-free layout, and it
-// opens in one frame: anything that grows or measures itself after the fact
-// (a Repeater over live data, a chart that resizes, a list that arrives late)
-// is a thing that can stutter when the machine is already under pressure —
-// which is exactly when this panel gets opened.
+// Deliberately small. It is three rows and two lines of text, built once:
+// anything that grows or measures itself after the fact — a Repeater over
+// live data, a chart that resizes, a list that arrives late — is something
+// that can stutter when the machine is already under pressure, which is
+// exactly when this panel gets opened.
 //
 // The decision logic is not here either. `bin/pulse-ctl` owns it, because a
-// threshold that changes what your desktop looks like belongs somewhere it can
-// be tested from a shell. This panel reads the snapshot that daemon writes.
+// threshold that changes what your desktop looks like belongs somewhere it
+// can be tested from a shell.
 Panel {
   id: root
-  moduleName: "io.github.USERNAME.pulse"
-  ipcTarget: "io.github.USERNAME.pulse"
+  moduleName: "io.github.shapesv.pulse"
+  ipcTarget: "io.github.shapesv.pulse"
+
+  // Set by BarWidget after loading.
+  property Item anchorItem: null
+  property Item hostWidget: null
 
   readonly property string pluginDir: Model.pluginDir()
   readonly property string ctl: pluginDir + "/bin/pulse-ctl"
   readonly property string python: Model.pythonBinary()
-  readonly property string snapshotPath: Model.snapshotPath()
 
-  property var status: Model.emptyStatus()
-  property string lastError: ""
-
+  // The icon already watches the snapshot; share its reading rather than
+  // opening a second FileView on the same file.
+  readonly property var status: hostWidget ? hostWidget.status : Model.emptyStatus()
   readonly property string profile: String(status.applied || "full")
   readonly property bool enabled: status.enabled !== false
   readonly property bool fresh: Model.isFresh(status)
   readonly property real temp: status.temp === null || status.temp === undefined ? -1 : Number(status.temp)
 
-  // One line of fact, built from at most two short strings.
+  property string lastError: ""
+
   readonly property string headline: {
     if (!fresh) return strings.t("pulse.stale")
     if (!enabled) return strings.t("pulse.pinned")
@@ -56,34 +60,6 @@ Panel {
     directory: Qt.resolvedUrl("i18n")
   }
 
-  // The bar sizes the widget slot from these. Without them the button is
-  // zero-sized and the panel anchors to a point rather than an icon, which
-  // puts the popup off the edge of the screen.
-  implicitWidth: button.implicitWidth
-  implicitHeight: button.implicitHeight
-
-  // Snapshot watcher. This is the whole reason the widget needs no timer:
-  // FileView follows the daemon's file, so the panel repaints when the daemon
-  // writes and costs nothing when it does not.
-  FileView {
-    id: snapshotFile
-    path: root.snapshotPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.applySnapshot(text())
-    onFileChanged: reload()
-  }
-
-  function applySnapshot(raw) {
-    var parsed = Model.parseSnapshot(raw)
-    if (parsed.ok) {
-      root.status = parsed.status
-      root.lastError = ""
-    } else if (parsed.error !== "") {
-      root.lastError = parsed.error
-    }
-  }
-
   function runCommand(args) {
     if (ctlProc.running) return
     ctlProc.command = [root.python, root.ctl, "--plugin-dir", root.pluginDir].concat(args)
@@ -98,7 +74,7 @@ Panel {
     runCommand(["enable", enabled ? "off" : "on"])
   }
 
-  onOpenedChanged: if (opened) snapshotFile.reload()
+  onOpenedChanged: if (opened && root.hostWidget) root.hostWidget.refreshSnapshot()
 
   Process {
     id: ctlProc
@@ -108,24 +84,15 @@ Panel {
     onExited: function(code) {
       if (code !== 0) root.lastError = strings.t("pulse.commandFailed")
       // The daemon owns the snapshot; read what it wrote rather than assume.
-      Qt.callLater(function() { snapshotFile.reload() })
+      Qt.callLater(function() {
+        if (root.hostWidget) root.hostWidget.refreshSnapshot()
+      })
     }
-  }
-
-  BarIconButton {
-    id: button
-    anchors.fill: parent
-    bar: root.bar
-    // One gamepad glyph chosen locally from a fixed set. Nothing user- or
-    // network-supplied reaches this property.
-    text: Model.profileGlyph(root.profile, root.enabled, root.fresh)
-    tooltipText: Model.barTooltip(root.profile, root.temp, root.enabled, root.fresh)
-    onPressed: function(b) { root.toggle() }
   }
 
   KeyboardPanel {
     id: panel
-    anchorItem: button
+    anchorItem: root.anchorItem
     owner: root
     bar: root.bar
     open: root.opened
@@ -195,9 +162,7 @@ Panel {
           spacing: Style.spacing.sm
 
           Repeater {
-            // Gaps expanded in the Repeater rather than an itemType delegate
-            // with a Timeout-based call: three fixed rows, built once, no
-            // data that can arrive mid-frame.
+            // Three fixed rows, built once from local catalogue strings.
             model: Model.profileRows(root.status, root.fresh, strings)
 
             Toggle {
@@ -216,7 +181,6 @@ Panel {
 
         PanelSeparator { foreground: root.bar.foreground }
 
-        // ---------- one switch, one button ----------
         Toggle {
           width: parent.width
           label: strings.t("pulse.auto")

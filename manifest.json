@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.USERNAME.pulse",
+  "id": "io.github.shapesv.pulse",
   "name": "Pulse",
   "version": "0.1.0",
-  "author": "USERNAME",
+  "author": "ShapesV",
   "license": "MIT",
   "description": "Adaptive performance profiles. Watches temperature, load and memory, and steps the desktop down to a lighter profile before a slowdown is felt, then steps back up when the air clears.",
   "kinds": [
@@ -11,7 +11,7 @@
   ],
   "activation": "on-demand",
   "entryPoints": {
-    "barWidget": "Panel.qml"
+    "barWidget": "BarWidget.qml"
   },
   "barWidget": {
     "displayName": "Pulse",

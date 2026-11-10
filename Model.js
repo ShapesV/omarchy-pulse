@@ -2,7 +2,7 @@
 // parsing and formatting can be exercised from a plain JS runtime.
 
 function pluginId() {
-  return "io.github.USERNAME.pulse"
+  return "io.github.shapesv.pulse"
 }
 
 function pluginDir() {

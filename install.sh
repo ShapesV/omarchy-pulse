@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-PLUGIN_ID="io.github.USERNAME.pulse"
+PLUGIN_ID="io.github.shapesv.pulse"
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$HOME/.config/omarchy/plugins/$PLUGIN_ID"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-pulse"
