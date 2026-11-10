@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "enabled": true,
+  "pollInterval": 2.0,
+  "profile": "medium",
+  "hysteresis": 3,
+  "holdSeconds": 20,
+  "tickers": {
+    "thermal": {
+      "enabled": true,
+      "thresholdPath": "",
+      "lightAbove": 88,
+      "mediumAbove": 75
+    },
+    "load": {
+      "enabled": true,
+      "lightAbove": 2.0,
+      "mediumAbove": 1.4
+    },
+    "memory": {
+      "enabled": true,
+      "lightBelow": 8,
+      "mediumBelow": 18
+    }
+  }
+}

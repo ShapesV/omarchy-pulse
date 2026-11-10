@@ -1,0 +1,29 @@
+[Unit]
+Description=Pulse — adaptive performance profiles for Omarchy
+Documentation=https://github.com/USERNAME/omarchy-pulse
+# The daemon needs a live Hyprland to read and write options, and it lives in
+# the user session for the same reason.
+After=wayland-wm@hyprland.desktop.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.config/omarchy/plugins/io.github.USERNAME.pulse/bin/pulse-ctl loop
+# Whatever ends this unit — a clean stop, a crash, a logout — hand the desktop
+# back before going away. `stop` is idempotent and harmless when nothing was
+# ever applied.
+ExecStopPost=/usr/bin/python3 %h/.config/omarchy/plugins/io.github.USERNAME.pulse/bin/pulse-ctl stop
+Restart=on-failure
+RestartSec=5
+# A sensor read and one JSON file twice a second is not work; keep it out of
+# the way of the things that are.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=30
+MemoryMax=64M
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pulse
+
+[Install]
+WantedBy=graphical-session.target

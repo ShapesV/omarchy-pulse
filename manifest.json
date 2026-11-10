@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.USERNAME.pulse",
+  "name": "Pulse",
+  "version": "0.1.0",
+  "author": "USERNAME",
+  "license": "MIT",
+  "description": "Adaptive performance profiles. Watches temperature, load and memory, and steps the desktop down to a lighter profile before a slowdown is felt, then steps back up when the air clears.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Pulse",
+    "description": "Adaptive performance profiles driven by temperature, load and memory",
+    "category": "System",
+    "aliases": [
+      "pulse",
+      "performance",
+      "profile",
+      "thermal",
+      "boost"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
